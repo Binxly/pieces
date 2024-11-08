@@ -48,76 +48,79 @@ class TorrentClient:
     """
     def __init__(self, torrent):
         self.tracker = Tracker(torrent)
-        # The list of potential peers is the work queue, consumed by the
-        # PeerConnections
-        self.available_peers = Queue()
-        # The list of peers is the list of workers that *might* be connected
-        # to a peer. Else they are waiting to consume new remote peers from
-        # the `available_peers` queue. These are our workers!
+        self.available_peers = asyncio.Queue()
         self.peers = []
-        # The piece manager implements the strategy on which pieces to
-        # request, as well as the logic to persist received pieces to disk.
         self.piece_manager = PieceManager(torrent)
         self.abort = False
 
     async def start(self):
         """
         Start downloading the torrent held by this client.
-
-        This results in connecting to the tracker to retrieve the list of
-        peers to communicate with. Once the torrent is fully downloaded or
-        if the download is aborted this method will complete.
         """
-        self.peers = [PeerConnection(self.available_peers,
-                                     self.tracker.torrent.info_hash,
-                                     self.tracker.peer_id,
-                                     self.piece_manager,
-                                     self._on_block_retrieved)
-                      for _ in range(MAX_PEER_CONNECTIONS)]
+        try:
+            self.peers = [
+                PeerConnection(
+                    self.available_peers,
+                    self.tracker.torrent.info_hash,
+                    self.tracker.peer_id,
+                    self.piece_manager,
+                    self._on_block_retrieved
+                ) for _ in range(MAX_PEER_CONNECTIONS)
+            ]
 
-        # The time we last made an announce call (timestamp)
-        previous = None
-        # Default interval between announce calls (in seconds)
-        interval = 30*60
+            previous = None
+            interval = 30 * 60
 
-        while True:
-            if self.piece_manager.complete:
-                logging.info('Torrent fully downloaded!')
-                break
-            if self.abort:
-                logging.info('Aborting download...')
-                break
+            while True:
+                if self.piece_manager.complete:
+                    logging.info('Torrent fully downloaded!')
+                    break
+                if self.abort:
+                    logging.info('Aborting download...')
+                    break
 
-            current = time.time()
-            if (not previous) or (previous + interval < current):
-                response = await self.tracker.connect(
-                    first=previous if previous else False,
-                    uploaded=self.piece_manager.bytes_uploaded,
-                    downloaded=self.piece_manager.bytes_downloaded)
+                current = time.time()
+                if (not previous) or (previous + interval < current):
+                    try:
+                        response = await self.tracker.connect(
+                            first=previous if previous else False,
+                            uploaded=self.piece_manager.bytes_uploaded,
+                            downloaded=self.piece_manager.bytes_downloaded
+                        )
 
-                if response:
-                    previous = current
-                    interval = response.interval
-                    self._empty_queue()
-                    for peer in response.peers:
-                        self.available_peers.put_nowait(peer)
-            else:
-                await asyncio.sleep(5)
-        self.stop()
+                        if response:
+                            previous = current
+                            interval = response.interval
+                            await self._empty_queue()
+                            for peer in response.peers:
+                                await self.available_peers.put(peer)
+                    except Exception as e:
+                        logging.error(f'Failed to connect to tracker: {str(e)}')
+                        await asyncio.sleep(5)
+                        continue
+                else:
+                    await asyncio.sleep(5)
+        finally:
+            await self.stop()
 
-    def _empty_queue(self):
-        while not self.available_peers.empty():
-            self.available_peers.get_nowait()
+    async def _empty_queue(self):
+        """Empty the queue of available peers"""
+        try:
+            while True:
+                self.available_peers.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
 
-    def stop(self):
-        """
-        Stop the download or seeding process.
-        """
+    async def stop(self):
+        """Stop the download or seeding process."""
         self.abort = True
+        stop_tasks = []
         for peer in self.peers:
-            peer.stop()
+            stop_tasks.append(peer.stop())
+        if stop_tasks:
+            await asyncio.gather(*stop_tasks, return_exceptions=True)
         self.piece_manager.close()
-        self.tracker.close()
+        await self.tracker.close()
 
     def _on_block_retrieved(self, peer_id, piece_index, block_offset, data):
         """
