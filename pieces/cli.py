@@ -19,36 +19,48 @@ import argparse
 import asyncio
 import signal
 import logging
-
 from concurrent.futures import CancelledError
-
 from pieces.torrent import Torrent
 from pieces.client import TorrentClient
 
+async def async_main(args):
+    client = TorrentClient(Torrent(args.torrent))
+    
+    # Setup signal handling
+    loop = asyncio.get_running_loop()
+    stop = loop.create_future()
+    
+    def signal_handler():
+        logging.info('Exiting, please wait until everything is shutdown...')
+        client.stop()
+        if not stop.done():
+            stop.set_result(None)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
+    
+    try:
+        await asyncio.gather(
+            client.start(),
+            stop
+        )
+    except CancelledError:
+        logging.warning('Event loop was canceled')
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('torrent',
-                        help='the .torrent to download')
+    parser.add_argument('torrent', help='the .torrent to download')
     parser.add_argument('-v', '--verbose', action='store_true',
-                        help='enable verbose output')
+                       help='enable verbose output')
 
     args = parser.parse_args()
     if args.verbose:
         logging.basicConfig(level=logging.INFO)
 
-    loop = asyncio.get_event_loop()
-    client = TorrentClient(Torrent(args.torrent))
-    task = loop.create_task(client.start())
-
-    def signal_handler(*_):
-        logging.info('Exiting, please wait until everything is shutdown...')
-        client.stop()
-        task.cancel()
-
-    signal.signal(signal.SIGINT, signal_handler)
-
     try:
-        loop.run_until_complete(task)
-    except CancelledError:
-        logging.warning('Event loop was canceled')
+        asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        pass
