@@ -23,6 +23,7 @@ import time
 from asyncio import Queue
 from collections import namedtuple, defaultdict
 from hashlib import sha1
+from typing import List
 
 from pieces.protocol import PeerConnection, REQUEST_SIZE
 from pieces.tracker import Tracker
@@ -167,7 +168,7 @@ class Piece:
     to as `Block` by the unofficial specification (the official specification
     uses piece for this one as well, which is slightly confusing).
     """
-    def __init__(self, index: int, blocks: [], hash_value):
+    def __init__(self, index: int, blocks: List[Block], hash_value):
         self.index = index
         self.blocks = blocks
         self.hash = hash_value
@@ -261,7 +262,7 @@ class PieceManager:
         self.total_pieces = len(torrent.pieces)
         self.fd = os.open(self.torrent.output_file,  os.O_RDWR | os.O_CREAT)
 
-    def _initiate_pieces(self) -> [Piece]:
+    def _initiate_pieces(self) -> List[Piece]:
         """
         Pre-construct the list of pieces and blocks based on the number of
         pieces and request size for this torrent.
